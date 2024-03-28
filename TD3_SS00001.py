@@ -1,17 +1,7 @@
-# 1차 논문 검증을 위한 교육용 Vanial DDPG 예제 입니다.
-# 결과에 대한 신뢰성은 절대로 담보할 수 없으니 공부하시는 용도로만 사용하세요.
-#  
-# 코드는 데이터 파일 (SS00001.csv)하고 같은 폴더에서 그냥 돌리면 됩니다.
-# 테스트는 맨 아래 메인에서 comment한 부분 바꿔 주시면 됩니다.
-#
-# State = [sigmoid(과거 7 일의 종가의 차이) + log(포트폴리오(현금+주식), 홀딩, 종가) + 4가지 기술적지표]
-# reward = 포트폴리오의 변화
-# Action = -10 ~ 10 
-#
-
 import pandas as pd
 import numpy as np
 
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -49,10 +39,10 @@ buffer_length = 5000
 #Hyperparameters
 learning_rate = 1.0e-6
 gamma         = 0.98
-batch_size    = 128
+batch_size    = 32
 tau = 0.001
-noise_scale = 1.0 #1.5
-final_noise_scale = 0.0 #0.5
+noise_scale = 1.0 # 1.5
+final_noise_scale = 0.0 # 0.5
 max_trade_share = 10
 
 class OrnsteinUhlenbeckActionNoise:
@@ -81,7 +71,6 @@ def hard_update(target, source):
     for target_param, param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(param.data)
 
-
 class Trade():
     def __init__(self, data, starting_balance=1000000, episodic_length=20, mode='train'):  
         super(Trade, self).__init__()
@@ -102,7 +91,7 @@ class Trade():
         self.cash = self.starting_balance
         self.shares = 0
         if self.mode == 'train':
-            self.cur_step = np.random.randint(0, len(self.data))
+            self.cur_step = self.next_episode
         else:
             self.cur_step = 0
         return self.next_observation()
@@ -136,7 +125,7 @@ class Trade():
             self.cash += price * share
             self.shares -= share
 
-        
+
     def next_observation(self):
         obs = []
         obs = np.append(obs, [self.cur_dclose_price])
@@ -178,39 +167,62 @@ class Actor(nn.Module):
     def __init__(self, state_size, action_size):
         super(Actor, self).__init__()
         self.fc1 = nn.Linear(state_size, 512)  
-        self.ln1 = nn.LayerNorm(512)
-        self.fc2 = nn.Linear(512, 256)  
-        self.ln2 = nn.LayerNorm(256)
-        self.value = nn.Linear(256, action_size) 
+        self.bn1 = nn.LayerNorm(512)
+        self.fc2 = nn.Linear(512, 256)
+        self.bn2 = nn.LayerNorm(256)  
+        self.fc3 = nn.Linear(256, action_size) 
         self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        
-    def forward(self, x, softmax_dim = -1):
-        x = self.fc1(x)
-        x = F.tanh(self.ln1(x))
-        x = self.fc2(x)
-        x = F.tanh(self.ln2(x))
-    #    prob = F.softmax(self.value(x), dim=softmax_dim)
-        prob = F.tanh(self.value(x))
+
+    def forward(self, x):
+        x = F.tanh(self.fc1(x))
+        x = F.tanh(self.fc2(x))
+#        x = F.tanh(self.bn1(self.fc1(x)))
+#        x = F.tanh(self.bn2(self.fc2(x)))
+#        prob = F.softmax(self.fc3(x), dim=-1)
+        prob = F.tanh(self.fc3(x))
         return prob
 
 class Critic(nn.Module):
     def __init__(self, state_size, action_size):
         super(Critic, self).__init__()
-        self.fc1 = nn.Linear(state_size, 512)  
-        self.ln1 = nn.LayerNorm(512)
-        self.fc2 = nn.Linear(512 + action_size, 256)  
-        self.ln2 = nn.LayerNorm(256)
-        self.value = nn.Linear(256, 1) 
+        self.fc1 = nn.Linear(state_size + action_size, 512)  
+        self.bn1 = nn.LayerNorm(512)
+        self.fc2 = nn.Linear(512, 256) 
+        self.bn2 = nn.LayerNorm(256)
+        self.fc3 = nn.Linear(256, 1) 
+
+        self.fc4 = nn.Linear(state_size + action_size, 512)  
+        self.bn4 = nn.LayerNorm(512)
+        self.fc5 = nn.Linear(512, 256)  
+        self.bn5 = nn.LayerNorm(256)
+        self.fc6 = nn.Linear(256, 1) 
+
         self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
 
-    def forward(self, x, actions):
-        x = self.fc1(x)
-        x = F.tanh(self.ln1(x))
-        x = torch.cat((x, actions), 1)
-        x = self.fc2(x)
-        x = F.tanh(self.ln2(x))
-        value = self.value(x)
-        return value
+    def forward(self, states, actions):
+        sa = torch.cat((states, actions), 1)
+#        q1 = F.tanh(self.bn1(self.fc1(sa)))
+#        q1 = F.tanh(self.bn2(self.fc2(q1)))
+        q1 = F.tanh(self.fc1(sa))
+        q1 = F.tanh(self.fc2(q1))
+        q1 = self.fc3(q1)
+ 
+        q2 = F.tanh(self.fc4(sa))
+        q2 = F.tanh(self.fc5(q2))
+#        q2 = F.tanh(self.bn4(self.fc4(sa)))
+#        q2 = F.tanh(self.bn5(self.fc5(q2)))
+        q2 = self.fc6(q2)
+        return q1, q2
+
+    def Q1(self, states, actions):
+        sa = torch.cat((states, actions), 1)
+        q1 = F.tanh(self.fc1(sa))
+        q1 = F.tanh(self.fc2(q1))
+#        q1 = F.tanh(self.bn1(self.fc1(sa)))
+#        q1 = F.tanh(self.bn2(self.fc2(q1)))
+        q1 = self.fc3(q1)
+        return q1
+
     
 class Memory():
     def __init__(self, buffer_len = 1000):
@@ -249,30 +261,40 @@ def train_net(memory, q, q_target, pi, pi_target):
 
     pi.train()
     q.train()
-
+    
     for i in range(4):
         s, a, r, s_prime, done = memory.make_batch()
 
-        q_batch = q(s, a)
-        a_prime_batch = pi_target(s_prime)
-        q_prime_batch = r + gamma * done * q_target(s_prime, a_prime_batch)
+        with torch.no_grad():
 
-        value_loss = F.mse_loss(q_batch, q_prime_batch)
+			# Compute the target Q value
+            noise = (torch.randn_like(a) * 0.1).clamp(-0.5,0.5)
+            a_prime_batch = (pi_target(s_prime) + noise).clamp(-1,1)
+            q1_target, q2_target = q_target(s_prime, a_prime_batch)
+            target_q = torch.min(q1_target, q2_target)
+            target_q = r + gamma * done * target_q
+
+        # get current Q value
+        q1_batch, q2_batch = q(s, a)
+ 
+        value_loss = F.mse_loss(q1_batch, target_q) + F.mse_loss(q2_batch, target_q)
 
         q.optimizer.zero_grad()
         value_loss.backward()
         q.optimizer.step()
         
-        policy_loss = -q(s, pi(s)).mean()
-        pi.optimizer.zero_grad()
-        policy_loss.backward()
-        pi.optimizer.step()
+        # Delayed policy updates
+        if i % 2 == 1:
+            policy_loss = -1 * q.Q1(s, pi(s)).mean()
+            pi.optimizer.zero_grad()
+            policy_loss.backward()
+            pi.optimizer.step()
 
-        soft_update(pi_target, pi, tau)
-        soft_update(q_target, q, tau)
+            soft_update(pi_target, pi, tau)
+            soft_update(q_target, q, tau)
 
-        loss_pi.append(policy_loss.detach().item())
-        loss_q.append(value_loss.detach().item())
+            loss_q.append(value_loss.detach().item())
+            loss_pi.append(policy_loss.detach().item())
         
     return np.mean(loss_pi), np.mean(loss_q)
 
@@ -281,12 +303,12 @@ def train_net(memory, q, q_target, pi, pi_target):
 def select_action(state, pi, pi_noisy, noise):  
     
     hard_update(pi_noisy, pi)
-    actor_params = pi_noisy.state_dict()
-    
-    param = actor_params['value.bias']
+    actor_params = pi_noisy.state_dict()    
+    param = actor_params['fc3.bias']
     param += torch.tensor(noise).float()
-        
-    action = pi_noisy(state)
+
+    action = pi_noisy(state).clamp(-1,1)
+    
     return action.detach().numpy()
 
 
@@ -301,7 +323,7 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
     q = Critic(state_size, action_size)
     q_target = Critic(state_size, action_size)
     memory = Memory(buffer_length)
-    noise = OrnsteinUhlenbeckActionNoise(action_size)
+    ounoise = OrnsteinUhlenbeckActionNoise(action_size)
     val_loss_history = []
     policy_loss_history = []
     pv_history = []    # portfolio history
@@ -313,8 +335,8 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
     np.random.seed(0)
 
     if start_epoch > 0:
-        pi.load_state_dict(torch.load("DDPGpi_ep" + str(start_epoch)))
-        q.load_state_dict(torch.load("DDPGq_ep" + str(start_epoch)))
+        pi.load_state_dict(torch.load("TD3pi_ep" + str(start_epoch)))
+        q.load_state_dict(torch.load("TD3q_ep" + str(start_epoch)))
 
     hard_update(q_target, q)
     hard_update(pi_target, pi)
@@ -322,22 +344,27 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
     pbar = tqdm(range(start_epoch, max_epoch))
     for n_epi in pbar:
         s = env.reset()
+        # DEBUG force the initial starting
+        env.cur_step = 0
+
         done = False
-        action_history = []        
-    
+        action_history = []
         # dwindling noise 
-        noise.scale = (noise_scale - final_noise_scale) * max(0, max_epoch-n_epi)/max_epoch + final_noise_scale
+        ounoise.scale = (noise_scale - final_noise_scale) * max(0, max_epoch-n_epi)/max_epoch + final_noise_scale
         
         # complete episode from start to end to build ReplayBuffer
+        action_history = []
 
-        # while not done:
-        for t in range(1, 1000):
+        while not done:
+        #for t in range(1, 1000):
             state = torch.from_numpy(s).float()
-            prob = select_action(state, pi, pi_noisy, noise())
+            noise = (np.random.randn(action_size) * ounoise.scale).clip(-1,1)
+#            noise = ounoise()
+            prob = select_action(state, pi, pi_noisy, noise)
             s_prime, r, done = env.step(prob)
             memory.put_data((s, prob, r, s_prime, done))
             s = s_prime
-            action_history.append( int(prob.item()*max_trade_share) )    
+            action_history.append( int(prob.item()*max_trade_share) )
             if done:
                 break                     
             
@@ -347,21 +374,22 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
         index_2 = len(np.where(np_actions < 0)[0])
         pv_history.append(env.cur_balance)
         pbar.set_description(str(index_0)+"/"+str(index_1)+"/"+str(index_2)+"/"+"%.4f" % env.cur_balance)
-        
+
         if len(memory.data)>=1000:
             policy_loss, val_loss = train_net(memory, q, q_target, pi, pi_target)
             val_loss_history.append(val_loss)
             policy_loss_history.append(policy_loss)
 
-        
+
         if n_epi % 100 == 0:
-            torch.save(q.state_dict(), "DDPGq_ep" + str(n_epi))    
-            torch.save(pi.state_dict(), "DDPGpi_ep" + str(n_epi))    
+            torch.save(q.state_dict(), "TD3q_ep" + str(n_epi))    
+            torch.save(pi.state_dict(), "TD3pi_ep" + str(n_epi))    
 
+    # run test before save the network
 
-    torch.save(q.state_dict(), "DDPGq_epfinal") 
-    torch.save(pi.state_dict(), "DDPGpi_epfinal") 
-
+    torch.save(q.state_dict(), "TD3q_epfinal") 
+    torch.save(pi.state_dict(), "TD3pi_epfinal") 
+    
     import matplotlib.pyplot as plt
     fig, axs = plt.subplots(3, 1, sharex = True)
 
@@ -377,44 +405,23 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
     axs[2].set_ylabel('profit', fontsize=12)
     axs[2].set_xlabel("date",fontsize=12)
 
-    plt.savefig('DDPG_S00001_test.png')
+    plt.savefig('TD3_S00001_test.png')
     plt.show()
     plt.pause(3)
     plt.close()
 
-"""## Debug
-    pi.eval()
-    q.eval()
-
-    s = env.reset()
-    env.cur_step = 0
-    done = False
-    action_history = []
-    # start from any random position of the training data
-    while not done:
-        state = torch.from_numpy(s).float()
-        prob = pi(state)
-        s_prime, r, done = env.step(prob)
-        s = s_prime
-        action_history.append( int(prob.item()*max_trade_share) )      
-
-    np_actions = np.array(action_history)
-    index_0 = len(np.where(np_actions == 0)[0])
-    index_1 = len(np.where(np_actions > 0)[0])
-    index_2 = len(np.where(np_actions < 0)[0])
-    print(str(index_0)+"/"+str(index_1)+"/"+str(index_2)+"/"+"%.4f" % env.cur_balance)
     
-## End of Debug
-"""    
 def test(starting_balance = 100000, window_size = 20, model_epi = 'final'):  
     mode = 'test'
-    env = Trade(test_data, starting_balance, window_size, mode)
+    data = test_data
+    env = Trade(data, starting_balance, window_size, mode)
     state_size = window_size + 7
     action_size = 1
+
     pi = Actor(state_size, action_size)
     q = Critic(state_size, action_size)
-    pi.load_state_dict(torch.load("DDPGpi_ep" + str(model_epi)))
-    q.load_state_dict(torch.load("DDPGq_ep" + str(model_epi)))
+    pi.load_state_dict(torch.load("TD3pi_ep" + str(model_epi)))
+    q.load_state_dict(torch.load("TD3q_ep" + str(model_epi)))
     
     pi.eval()
     q.eval()
@@ -424,7 +431,7 @@ def test(starting_balance = 100000, window_size = 20, model_epi = 'final'):
 
     s = env.reset()
     done = False
-    
+
     # start from any random position of the training data
     while not done:
         state = torch.from_numpy(s).float()
@@ -436,17 +443,16 @@ def test(starting_balance = 100000, window_size = 20, model_epi = 'final'):
         pv_history.append(pv)                   
 
     np_actions = np.array(action_history)
-    test_close = test_data["Close"].values
-    
+    test_close = data["Close"].values
+
     index_0 = np.where(np_actions == 0)[0]
     index_1 = np.where(np_actions > 0)[0]
     index_2 = np.where(np_actions < 0)[0]
 
     print(str(len(index_0))+"/"+str(len(index_1))+"/"+str(len(index_2))+"/"+"%.4f" % env.cur_balance)
-
+   
     import matplotlib.pyplot as plt
     fig, axs = plt.subplots(2, 1, sharex = True)
-
 
     if len(index_0) > 0:
         axs[0].scatter(index_0, test_close[index_0], c='red', label='hold', marker='^')
@@ -465,12 +471,12 @@ def test(starting_balance = 100000, window_size = 20, model_epi = 'final'):
 
     axs[1].set_ylabel('Portfolio', fontsize=22)
     axs[1].set_xlabel("date",fontsize=22)
-    plt.savefig('DDPG_S00001_test.png')
+    plt.savefig('TD3_S00001_test.png')
     plt.show()
     plt.pause(3)
     plt.close()
         
 if __name__ == '__main__':
     starting_balance=100000
-    train(starting_balance=starting_balance, window_size=7, resume_epoch=0, max_epoch = 1000)      
-#    test(starting_balance=starting_balance, window_size=7, model_epi='final')
+    train(starting_balance, window_size=7, resume_epoch=0, max_epoch = 300)      
+#    test(starting_balance, window_size=7, model_epi='300')

@@ -1,4 +1,4 @@
-# 1차 논문 검증을 위한 교육용 Native PPO 예제 입니다.
+# 1차 논문 검증을 위한 교육용 Vanila PPO 예제 입니다.
 # 결과에 대한 신뢰성은 절대로 담보할 수 없으니 공부하시는 용도로만 사용하세요.
 #  
 # 코드는 데이터 파일 (SS00001.csv)하고 같은 폴더에서 그냥 돌리면 됩니다.
@@ -6,7 +6,7 @@
 #
 # State = [sigmoid(과거 7 일의 종가의 차이) + log(포트폴리오(현금+주식), 홀딩, 종가) + 4가지 기술적지표]
 # reward = 포트폴리오의 변화
-# Action = Hold:0, Buy:1, Sell:2 에 따라 한주씩만 거래
+# Action = -10 ~ 10 
 #
 
 import pandas as pd
@@ -44,25 +44,22 @@ close = df['Close']
 dclose = df['dClose']
 data = pd.concat([close, dclose, indicator], axis=1)
 
-train_data = data.loc[(data.index > '2017-01-01') & (data.index <= '2021-12-31'), :]
-test_data = data.loc[data.index >= '2022-01-01', :]
+train_data = data.loc[(data.index > '1998-01-01') & (data.index <= '2019-11-31'), :]
+test_data = data.loc[(data.index >= '2019-12-01') & (data.index <= '2021-05-31'), :]
 
 # Critic에 Generalized Advantage Estimation (GAE) 를 사용했습니다.
 
+buffer_length = 5000
 #Hyperparameters
-learning_rate = 0.0001
+learning_rate = 1.0e-6 
 gamma         = 0.98
 epsilon       = 0.10  #PPO clip para
 beta          = 0.01  #PPO entropy para
 lam           = 0.5   # if lam = 0 A2C is same as TD AC
 val_loss_coef = 0.5   #Critic loss contribution
-buffer_limit  = 1000
-batch_size    = 64
-
-class Actions(enum.Enum):
-    Hold = 0
-    Buy = 1
-    Sell = 2
+batch_size    = 128
+max_trade_share = 10  # 최대 buy or sell position
+action_space  = 2*max_trade_share + 1
 
 class Trade():
     def __init__(self, data, starting_balance=1000000, episodic_length=20, mode='train'):  
@@ -76,41 +73,49 @@ class Trade():
         self.commission_rate = 0.001
         self.cash = self.starting_balance
         self.shares = 0
-        self.total_episodes = len(data) - episodic_length
-        self.cur_step = self.next_episode
+        self.total_episodes = len(data)
+        self.cur_step = 0
         self.mode = mode
 
     def reset(self):
         self.cash = self.starting_balance
         self.shares = 0
-        self.cur_step = 0
-
+        if self.mode == 'train':
+            self.cur_step = self.next_episode
+        else:
+            self.cur_step = 0
         return self.next_observation()
 
     
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        self.take_action(action)
-        state = self.next_observation()
-        reward = self.cur_balance - balance
+        if self.cur_step < self.total_steps:
+            self.take_action(action)
+            state = self.next_observation()
+            reward = self.cur_balance - balance
+        
         done = self.cur_step == self.total_steps - 1
         return state, reward, done
     
-    # 한번에 한주 씩 사거나 파는 것으로 가정
-
-    def take_action(self, action):  
-        if action == Actions.Buy.value:
+    # 한루에 한번 씩 사거나 파는 것으로 가정
+    def take_action(self, actions): 
+        action = actions - 10
+        if action > 0:
+            share = action
             price = self.cur_close_price * (1 + self.commission_rate)
-            if self.cash > price:
-                self.cash -= price
-                self.shares += 1
+            if self.cash < price * share:
+                share = int(self.cash / (price * share))
+            self.cash -= price * share
+            self.shares += share
 
-        elif action == Actions.Sell.value:
-            if self.shares > 0:
-                price = self.cur_close_price * (1 - self.commission_rate)
-                self.cash += price
-                self.shares -= 1
+        elif action < 0:
+            share = -1*action
+            price = self.cur_close_price * (1 - self.commission_rate)
+            if self.shares < share:
+                share = self.shares
+            self.cash += price * share
+            self.shares -= share
 
  
     def next_observation(self):
@@ -150,16 +155,16 @@ class Trade():
         return self.cash + (self.shares * self.cur_close_price)
 
 class ReplayBuffer():
-    def __init__(self):
-        self.buffer = deque(maxlen = buffer_limit)
+    def __init__(self, buffer_len = 1000):
+        self.buffer = deque(maxlen = buffer_len)
     
-    def put(self, transition):
+    def put_data(self, transition):
         self.buffer.append(transition)
     
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
+    def make_batch(self):
         s_lst, a_lst, r_lst, p_a_lst, s_prime_lst, done_lst = [], [], [], [], [], []
-
+        start =  random.randrange(0, self.size()-batch_size)
+        mini_batch = [self.buffer[i] for i in range(start,start+batch_size)]
         for transition in mini_batch:
             s, a, r, p_a, s_prime, done = transition
             s_lst.append(s)
@@ -167,7 +172,8 @@ class ReplayBuffer():
             r_lst.append([r])
             p_a_lst.append([p_a])
             s_prime_lst.append(s_prime)
-            done_lst.append([done])
+            done_mask = 0.0 if done else 1.0
+            done_lst.append([done_mask])
 
         s_lst = np.array(s_lst)
         a_lst = np.array(a_lst)
@@ -175,6 +181,7 @@ class ReplayBuffer():
         p_a_lst = np.array(p_a_lst)
         s_prime_lst = np.array(s_prime_lst)
         done_lst = np.array(done_lst)
+
         s_batch, a_batch, r_batch, p_a_batch, s_prime_batch, done_batch = torch.tensor(s_lst, dtype=torch.float), \
                                                             torch.tensor(a_lst), \
                                                             torch.tensor(r_lst, dtype=torch.float), \
@@ -192,36 +199,33 @@ class ActorCritic(nn.Module):
         super(ActorCritic, self).__init__()
 
         self.fc1_pi = nn.Linear(state_size, 512)  
-        self.fc2_pi = nn.Linear(512, 128)  
-        self.fc3_pi = nn.Linear(128, 32)  
-        self.fc4_pi = nn.Linear(32, action_size) 
+        self.fc2_pi = nn.Linear(512, 256)  
+        self.fc3_pi = nn.Linear(256, action_size) 
         self.fc1_v = nn.Linear(state_size, 512) 
-        self.fc2_v = nn.Linear(512, 128)
-        self.fc3_v = nn.Linear(128, 32)
-        self.fc4_v = nn.Linear(32, 1)
+        self.fc2_v = nn.Linear(512, 256)
+        self.fc3_v = nn.Linear(256, 1)
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         
-        self.action_size = action_size
-        self.state_size = state_size
-
     def pi(self, x, softmax_dim = -1):
-        x = F.relu(self.fc1_pi(x))
-        x = F.relu(self.fc2_pi(x))
-        x = F.relu(self.fc3_pi(x))
-        prob = F.softmax(self.fc4_pi(x), dim=softmax_dim)
+        x = F.tanh(self.fc1_pi(x))
+        x = F.tanh(self.fc2_pi(x))
+    #    prob = F.tanh(self.fc3_pi(x))
+        prob = F.softmax(self.fc3_pi(x), dim=softmax_dim)
         return prob
-    
+
     def v(self, x):
-        x = F.relu(self.fc1_v(x))
-        x = F.relu(self.fc2_v(x))
-        x = F.relu(self.fc3_v(x))
-        v = self.fc4_v(x)
+        x = F.tanh(self.fc1_v(x))
+        x = F.tanh(self.fc2_v(x))
+        v = self.fc3_v(x)
         return v
 
-def train_net(model, memory, optimizer):
-    total_loss = []
 
-    for _ in range(10):
-        s, a, r, prob_a, s_prime, done = memory.sample(batch_size)
+def train_net(model, memory):
+    total_loss = []
+    model.train()
+
+    for _ in range(4):
+        s, a, r, prob_a, s_prime, done = memory.make_batch()
         v_cur = model.v(s)
         v_next = model.v(s_prime)
 
@@ -237,9 +241,10 @@ def train_net(model, memory, optimizer):
         
         # standadize advs
         advs = (advs - advs.mean())/(advs.std() + 1.0e-8)
-            
-        pi_cur = model.pi(s, softmax_dim=1).squeeze(1)
-        pi_a = pi_cur.gather(1,a)
+        
+        # current policy
+        pi_cur = model.pi(s, softmax_dim=-1)  # from new policy
+        pi_a = pi_cur.gather(1,a.to(torch.long))  # need int64
 
         # PPO
         ratios = torch.exp(torch.log(pi_a)-torch.log(prob_a))
@@ -248,30 +253,33 @@ def train_net(model, memory, optimizer):
         policy_loss = -torch.min(sur_1, sur_2).mean()   #Eq 7.34
 
         # entropy regularization
-        entropy = -torch.sum(pi_cur * torch.log(pi_cur)) / np.log(len(pi_cur))
+        entropy = -torch.sum(torch.abs(pi_cur) * torch.log(torch.abs(pi_cur))) / np.log(len(pi_cur))
 
         ent_penalty = -beta * entropy
         val_loss = val_loss_coef * F.mse_loss(v_cur, v_target)
         loss = policy_loss + ent_penalty + val_loss
 
         total_loss.append(loss.detach().numpy())
-        optimizer.zero_grad()
+        model.optimizer.zero_grad()
         loss.backward()
-        optimizer.step()   
+        model.optimizer.step()   
 
     memory.buffer = []  # clear the history since it is on-policy
     return np.mean(total_loss)
-
 
 def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=1000):  
     mode = 'train'
     env = Trade(train_data, starting_balance, window_size, mode)
     state_size = window_size + 7
-    action_size = 3
-    model = ActorCritic(state_size, action_size)
-    memory = ReplayBuffer()
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+    action_size = action_space
     
+    torch.manual_seed(0)
+    np.random.seed(0)
+    
+    model = ActorCritic(state_size, action_size)
+
+    memory = ReplayBuffer()
+
     save_interval = 100
     epochs = max_epoch
     loss_history = []
@@ -280,7 +288,8 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
     # to continue from the previous saving
 
     start_epoch = resume_epoch
-    if start_epoch >= 0:
+    
+    if start_epoch > 0:
         model.load_state_dict(torch.load("PPOmodel_ep" + str(start_epoch)))
         
     pbar = tqdm(range(start_epoch, epochs))
@@ -289,26 +298,29 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
         s = env.reset()
         done = False
         action_history = []
+
         # complete one episode
-       
+
         while not done:
-            state = torch.from_numpy(s).float()
-            prob = model.pi(state)  #state1: torch.size([7])
+            s = torch.from_numpy(s).float()
+            prob = model.pi(s, softmax_dim=-1)  #state1: torch.size([7])
             m = Categorical(prob)
             a = m.sample().item()
             s_prime, r, done = env.step(a)
-            done_mask = 0.0 if done else 1.0
-            memory.put((s, a, r, prob.detach().numpy()[a], s_prime, done_mask))
+            memory.put_data((s, a, r, prob[a].item(), s_prime, done))
+            action_history.append( a )    
             s = s_prime
 
-        if memory.size() > batch_size:        
-            loss = train_net(model, memory, optimizer)
-
-        loss_history.append(loss)
+        np_actions = np.array(action_history)
+        index_0 = len(np.where(np_actions == 0)[0])
+        index_1 = len(np.where(np_actions > 0)[0])
+        index_2 = len(np.where(np_actions < 0)[0])
         pv_history.append(env.cur_balance)
+        pbar.set_description(str(index_0)+"/"+str(index_1)+"/"+str(index_2)+"/"+"%.4f" % env.cur_balance)
 
-        #pbar.set_description('%d'%np.exp(s[window_size])+'/'+'%d'%np.exp(s[window_size+1])+'/'+'%.1f'%loss)
-        pbar.set_description('%.1f'%env.cur_balance)
+        if memory.size() > batch_size:        
+            loss = train_net(model, memory)
+            loss_history.append(loss)
         
         # save log every n step
         if n_epi % save_interval == 0:
@@ -336,10 +348,11 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
     mode = 'test'
     env = Trade(test_data, starting_balance, window_size, mode)
     state_size = window_size + 7
-    action_size = 3
+    action_size = action_space
     model = ActorCritic(state_size, action_size)
 
     model.load_state_dict(torch.load("PPOmodel_ep" + str(model_epi)))
+    
     model.eval()
 
     action_history = []
@@ -352,34 +365,38 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
     while not done:
         state = torch.from_numpy(s).float()
         prob = model.pi(state)  #state1: torch.size([7])
-        m = Categorical(prob)
-        a = m.sample().item()
-        s_prime, r, done = env.step(a)
+        s_prime, r, done = env.step(prob)
         s = s_prime 
-        action_history.append(a)
+        action_history.append( int(prob.item()*max_trade_share) )    
         pv = np.exp(s_prime[window_size])    
-        pv_history.append(pv)    
+        pv_history.append(pv)                  
 
-        if done:
-            break                     
-
-    print("portfolio: {0}".format(pv))    
-
-    fig, axs = plt.subplots(2, 1, sharex = True)
     np_actions = np.array(action_history)
     test_close = test_data["Close"].values
-    axs[0].plot(test_close)
+
     index_0 = np.where(np_actions == 0)[0]
-    index_1 = np.where(np_actions == 1)[0]
-    index_2 = np.where(np_actions == 2)[0]
-    
+    index_1 = np.where(np_actions > 0)[0]
+    index_2 = np.where(np_actions < 0)[0]
+    print(str(len(index_0))+"/"+str(len(index_1))+"/"+str(len(index_2))+"/"+"%.4f" % env.cur_balance)
+
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(2, 1, sharex = True)    
+
 #    axs[0].scatter(index_0, test_close[index_0], c='red', label='hold', marker='^')
-    axs[0].scatter(index_1, test_close[index_1], c='green', label='buy', marker='>')
-    axs[0].scatter(index_2, test_close[index_2], c='blue', label='sell', marker='v')
+    if len(index_0) > 0:
+        axs[0].scatter(index_0, test_close[index_0], c='red', label='hold', marker='^')
+    if len(index_1) > 0:
+        axs[0].scatter(index_1, test_close[index_1], c='green', label='buy', marker='>')
+    if len(index_2) > 0:
+        axs[0].scatter(index_2, test_close[index_2], c='blue', label='sell', marker='v')
+    axs[0].plot(test_close)
     axs[0].legend()
     axs[0].set_ylabel('Close', fontsize=22)
 
-    axs[1].plot(pv_history)
+    axs[1].plot(pv_history, c='red', label='pv')
+    axs[1].plot(test_data['Close'].values * starting_balance / test_data['Close'].iloc[0], c='black', label='close')
+    axs[1].legend()
+
     axs[1].set_ylabel('Portfolio', fontsize=22)
     axs[1].set_xlabel("date",fontsize=22)
     plt.savefig('PPO_S00001_test.png')
@@ -389,5 +406,6 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
         
         
 if __name__ == '__main__':
-    train(window_size = 7, starting_balance = 100000, resume_epoch = 0, max_epoch = 200)      
-#    test(window_size = 7, starting_balance = 100000, model_epi = 'final')
+    starting_balance=100000
+    train(window_size = 7, starting_balance=starting_balance, resume_epoch = 0, max_epoch = 1000)      
+#    test(window_size = 7, starting_balance=starting_balance, model_epi = 'final')

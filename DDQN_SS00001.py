@@ -17,7 +17,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from collections import deque
 
@@ -43,21 +42,28 @@ close = df['Close']
 dclose = df['dClose']
 data = pd.concat([close, dclose, indicator], axis=1)
 
-train_data = data.loc[(data.index > '2018-01-01') & (data.index <= '2022-12-31'), :]
-test_data = data.loc[data.index >= '2023-01-01', :]
+train_data = data.loc[(data.index > '1998-01-01') & (data.index <= '2019-11-31'), :]
+test_data = data.loc[(data.index >= '2019-12-01') & (data.index <= '2021-05-31'), :]
 
 # Generalized Advantage Estimation (GAE) and n-step Return
 
 #Hyperparameters
-learning_rate = 0.0001
+learning_rate = 1.0e-6
 gamma         = 0.98
 buffer_limit  = 1000
 batch_size    = 32     # for mini_batch
+max_trade_share = 10
+tau           = 0.001
+action_space  = 2*max_trade_share + 1
 
-class Actions(enum.Enum):
-    Hold = 0
-    Buy = 1
-    Sell = 2
+def soft_update(target, source, tau):
+    for target_param, param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
+
+def hard_update(target, source):
+    for target_param, param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_(param.data)
+
 
 class Trade():
     def __init__(self, data, starting_balance=1000000, episodic_length=20, mode='train'):  
@@ -72,42 +78,47 @@ class Trade():
         self.cash = self.starting_balance
         self.shares = 0
         self.total_episodes = len(data)
-        self.cur_step = self.next_episode
+        self.cur_step = 0
         self.mode = mode
 
     def reset(self):
         self.cash = self.starting_balance
         self.shares = 0
-        self.cur_step = 0
-
+        if self.mode == 'train':
+            self.cur_step = self.next_episode
+        else:
+            self.cur_step = 0
         return self.next_observation()
 
     
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        self.take_action(action)
-        state = self.next_observation()
-        reward = self.cur_balance - balance
-        done = self.cur_step == self.total_steps - 1
+        if self.cur_step < self.total_steps:
+            self.take_action(action)
+            state = self.next_observation()
+            reward = self.cur_balance - balance
         
-        if done:
-            self.reset()
-
+        done = self.cur_step == self.total_steps - 1
         return state, reward, done
     
     def take_action(self, action):  
-        if action == Actions.Buy.value:
+        action -= max_trade_share
+        if action > 0:
+            share = action
             price = self.cur_close_price * (1 + self.commission_rate)
-            if self.cash > price:
-                self.cash -= price
-                self.shares += 1
+            if self.cash < price * share:
+                share = int(self.cash / (price * share))
+            self.cash -= price * share
+            self.shares += share
 
-        elif action == Actions.Sell.value:
-            if self.shares > 0:
-                price = self.cur_close_price * (1 - self.commission_rate)
-                self.cash += price
-                self.shares -= 1
+        elif action < 0:
+            share = -1*action
+            price = self.cur_close_price * (1 - self.commission_rate)
+            if self.shares < share:
+                share = self.shares
+            self.cash += price * share
+            self.shares -= share
 
 
     def next_observation(self):
@@ -178,43 +189,39 @@ class Dqn(nn.Module):
     def __init__(self, state_size, action_size):
         super(Dqn, self).__init__()
      
-        self.fc1_q = nn.Linear(state_size, 64)  
-        self.fc2_q = nn.Linear(64, 32)  
-        self.fc3_q = nn.Linear(32, 8)  
-        self.fc4_q = nn.Linear(8, action_size) 
-
-        self.action_size = action_size
-        self.state_size = state_size
-        self.epsilon       = 0.1
-        self.epsilon_min   = 0.01
-        self.epsilon_decay = 0.995
+        self.fc1 = nn.Linear(state_size, 512)  
+        self.ln1   = nn.LayerNorm(512)
+        self.fc2 = nn.Linear(512, 256)  
+        self.ln2   = nn.LayerNorm(256)
+        self.fc3 = nn.Linear(256, action_size) 
 
     def forward(self, x):
-        x = F.relu(self.fc1_q(x))
-        x = F.relu(self.fc2_q(x))
-        x = F.relu(self.fc3_q(x))
-        prob = self.fc4_q(x)
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = F.relu(self.ln2(self.fc2(x)))
+        prob = F.softmax(self.fc3(x), dim=-1)
         return prob
 
     def sample_action(self, state, epsilon):         
         out = self.forward(state)
         coin = random.random()
         if coin < epsilon:
-            return np.random.randint(0, 3)
+            return np.random.randint(0, action_space)
         else:
             return out.argmax().item()   
 
 def train_net(q, q_target, memory, optimizer):
     total_loss = []
+    q.train()
+    
         # we will randomly process n times of batches from the buffer 
-    for _ in range(10):
+    for _ in range(4):
         s, a, r, s_prime, done = memory.sample(batch_size)
         q_out = q(s)
         q_a = q_out.gather(1,a)
 
         with torch.no_grad():
             qtarget_out = q_target(s_prime)
-        bestaction = qtarget_out.max(1)[1].unsqueeze(1)    
+        bestaction = qtarget_out.argmax(1).unsqueeze(1) #qtarget_out.max(1)[1].unsqueeze(1)    #
         
         max_q_prime = qtarget_out.gather(1,bestaction) 
         target = r + gamma * max_q_prime * done
@@ -226,11 +233,11 @@ def train_net(q, q_target, memory, optimizer):
 
     return np.mean(total_loss)
 
-def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=1000):  
+def train(window_size=20, starting_balance = 100000, resume_epoch=0, max_epoch=1000):  
     mode = 'train'
     env = Trade(train_data, starting_balance, window_size, mode)
     state_size = window_size + 7
-    action_size = 3
+    action_size = action_space
     q = Dqn(state_size, action_size)
     q_target = Dqn(state_size, action_size)
     memory = ReplayBuffer()
@@ -239,14 +246,18 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
     save_interval = 100
     epochs = max_epoch
     loss_history = []
-
+    pv_history = []    # portfolio history
     # to continue from the previous saving
 
     start_epoch = resume_epoch
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+
     if start_epoch > 0:
         q.load_state_dict(torch.load("DDqnmodel_ep" + str(start_epoch)))
-
-    q_target.load_state_dict(q.state_dict())
+    
+    hard_update(q_target, q)
 
     pbar = tqdm(range(start_epoch, epochs))
 
@@ -258,7 +269,7 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
 
         s = env.reset()
         done = False
-
+        action_history = []
         # complete one episode
  
         while not done:
@@ -268,12 +279,19 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
             done_mask = 0.0 if done else 1.0
             memory.put((s, a, r, s_prime, done_mask))
             s = s_prime
+            action_history.append(a)  
                                      
         if memory.size() > batch_size:
             loss = train_net(q, q_target, memory, optimizer)
 
         loss_history.append(loss)
-        pbar.set_description("loss %.4f" % loss)
+
+        np_actions = np.array(action_history)
+        index_0 = len(np.where(np_actions == 10)[0])
+        index_1 = len(np.where(np_actions > 10)[0])
+        index_2 = len(np.where(np_actions < 10)[0])
+        pv_history.append(env.cur_balance)
+        pbar.set_description(str(index_0)+"/"+str(index_1)+"/"+str(index_2)+"/"+"%.4f" % env.cur_balance)
 
         # update target network
         if n_epi % update_interval == 0:
@@ -284,20 +302,29 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
             torch.save(q.state_dict(), "DDqnmodel_ep" + str(n_epi))    
 
     torch.save(q.state_dict(), "DDqnmodel_epfinal") 
-    plt.figure(figsize=(10,7))
-    plt.plot(loss_history)
-    plt.xlabel("Epochs",fontsize=22)
-    plt.ylabel("Loss",fontsize=22)
-    plt.savefig('DDQN_S00001_train.png')
+
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(2, 1, sharex = True)
+
+    axs[0].plot(loss_history)
+    axs[0].set_ylabel('policy_loss', fontsize=12)
+    axs[0].set_xlabel("update",fontsize=12)
+
+    axs[1].plot(pv_history)
+    axs[1].set_ylabel('profit', fontsize=12)
+    axs[1].set_xlabel("date",fontsize=12)
+
+    plt.savefig('DDQN_S00001_test.png')
     plt.show()
     plt.pause(3)
     plt.close()
+
     
-def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):  
+def test(window_size = 20, starting_balance = 100000, model_epi = 'final'):  
     mode = 'test'
     env = Trade(test_data, starting_balance , window_size, mode)
     state_size = window_size + 7
-    action_size = 3
+    action_size = action_space
     q = Dqn(state_size, action_size)
     q.load_state_dict(torch.load("DDqnmodel_ep" + str(model_epi)))
     q.eval()
@@ -312,42 +339,47 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
     while not done:
         state = torch.from_numpy(s).float()
         q_out = q(state)
-        a = q_out.argmax().numpy().item()
+        a = q_out.argmax().numpy().item()#
         s_prime, r, done = env.step(a)
         s = s_prime
         action_history.append(a)
         pv = np.exp(s_prime[window_size])    
-        pv_history.append(pv)    
+        pv_history.append(pv)                     
 
-        if done:
-            break                     
-
-    print("portfolio: {0}".format(pv))        
-
-    fig, axs = plt.subplots(2, 1, sharex = True)
+    print("portfolio: {0}".format(pv))
 
     np_actions = np.array(action_history)
     test_close = test_data["Close"].values
-    axs[0].plot(test_close)
-    index_0 = np.where(np_actions == 0)[0]
-    index_1 = np.where(np_actions == 1)[0]
-    index_2 = np.where(np_actions == 2)[0]
     
-    axs[0].scatter(index_0, test_close[index_0], c='red', label='hold', marker='^')
-    axs[0].scatter(index_1, test_close[index_1], c='green', label='buy', marker='>')
-    axs[0].scatter(index_2, test_close[index_2], c='blue', label='sell', marker='v')
+    index_0 = np.where(np_actions == 10)[0]
+    index_1 = np.where(np_actions > 10)[0]
+    index_2 = np.where(np_actions < 10)[0]
+
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(2, 1, sharex = True)
+    
+    if len(index_0) > 0:
+        axs[0].scatter(index_0, test_close[index_0], c='red', label='hold', marker='^')
+    if len(index_1) > 0:
+        axs[0].scatter(index_1, test_close[index_1], c='green', label='buy', marker='>')
+    if len(index_2) > 0:
+        axs[0].scatter(index_2, test_close[index_2], c='blue', label='sell', marker='v')
+
+    axs[0].plot(test_close)
     axs[0].legend()
     axs[0].set_ylabel('Close', fontsize=22)
-
-    axs[1].plot(pv_history)
+    
+    axs[1].plot(pv_history, c='red', label='pv')
+    axs[1].plot(test_data['Close'].values * starting_balance / test_data['Close'].iloc[0], c='black', label='close')
+    axs[1].legend()
     axs[1].set_ylabel('Portfolio', fontsize=22)
     axs[1].set_xlabel("date",fontsize=22)
-
     plt.savefig('DDQN_S00001_test.png')
     plt.show()
     plt.pause(3)
     plt.close()
         
 if __name__ == '__main__':
-    train(window_size=7, starting_balance = 1000000, resume_epoch=0, max_epoch = 1000)      
-#   test(window_size=7, starting_balance = 1000000, model_epi='final')
+    starting_balance = 100000 
+    train(window_size=7, starting_balance = starting_balance, resume_epoch=0, max_epoch = 1000)      
+#  test(window_size=7, starting_balance=staring_balance, model_epi='800')
