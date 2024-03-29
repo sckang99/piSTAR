@@ -88,12 +88,12 @@ class Trade():
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        if self.cur_step < self.total_steps:
+        if self.cur_step < self.total_steps - 1:      
             self.take_action(action)
             state = self.next_observation()
             reward = self.cur_balance - balance
         
-        done = self.cur_step == self.total_steps - 1
+        done = self.cur_step == self.total_steps - 2
         return state, reward, done
     
     def take_action(self, actions): 
@@ -123,7 +123,7 @@ class Trade():
     
     @property
     def next_episode(self):
-        return random.randrange(0, self.total_episodes)
+        return random.randrange(0, self.total_episodes - batch_size)
 
     @property
     def cur_indicators(self):
@@ -290,16 +290,18 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
 
         # complete one episode
         # start from any random position of the training data
-
-        while not done:
+#        while not done:
+        for t in range(2000):
             state = torch.from_numpy(s).float()
-            prob = model.pi(state)  #state1: torch.size([7])
+            prob = model.pi(state, softmax_dim=-1)  #state1: torch.size([7])
             m = Categorical(prob)
             a = m.sample().item()
             s_prime, r, done = env.step(a)
             memory.put_data((s, a, r, s_prime, done))
-            action_history.append(a)  
             s = s_prime
+            action_history.append(a)  
+            if done:
+                break
 
         np_actions = np.array(action_history)
         index_0 = len(np.where(np_actions == 10)[0])
@@ -316,7 +318,7 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
         if n_epi % save_interval == 0:
             torch.save(model.state_dict(), "A2Cmodel_ep" + str(n_epi))    
 
-    torch.save(model.state_dict(), "A2Cmodel_final")
+    torch.save(model.state_dict(), "A2Cmodel_epfinal")
 
     import matplotlib.pyplot as plt
     plt.figure(figsize=(10,7))
@@ -356,14 +358,15 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
         pv = np.exp(s_prime[window_size])    
         pv_history.append(pv)       
 
-    print("portfolio: {0}".format(pv))    
-
     np_actions = np.array(action_history)
     test_close = test_data["Close"].values
+
     index_0 = np.where(np_actions == 10)[0]
     index_1 = np.where(np_actions < 10)[0]
     index_2 = np.where(np_actions > 10)[0]
-    
+
+    print(str(len(index_0))+"/"+str(len(index_1))+"/"+str(len(index_2))+"/"+"%.4f" % env.cur_balance)
+
     import matplotlib.pyplot as plt
     fig, axs = plt.subplots(2, 1, sharex = True)    
 
@@ -392,6 +395,6 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
 
         
 if __name__ == '__main__':
- 
-    train(window_size=1, starting_balance = 100000, resume_epoch=0, max_epoch = 1000)      
-#  test(window_size=1, starting_balance = 100000, model_epi='800')
+    starting_balance=100000
+    train(window_size=7, starting_balance = starting_balance, resume_epoch=0, max_epoch = 1000)      
+#    test(window_size=7, starting_balance = starting_balance, model_epi='final')

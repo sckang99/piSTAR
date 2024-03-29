@@ -102,7 +102,7 @@ class Trade():
         self.cash = self.starting_balance
         self.shares = 0
         if self.mode == 'train':
-            self.cur_step = np.random.randint(0, len(self.data))
+            self.cur_step = np.random.randint(0, len(self.data)-batch_size)
         else:
             self.cur_step = 0
         return self.next_observation()
@@ -110,12 +110,12 @@ class Trade():
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        if self.cur_step < self.total_steps:
+        if self.cur_step < self.total_steps - 1:
             self.take_action(action)
             state = self.next_observation()
             reward = self.cur_balance - balance
         
-        done = self.cur_step == self.total_steps - 1
+        done = self.cur_step == self.total_steps - 2
         return state, reward, done
     
     def take_action(self, actions): 
@@ -181,7 +181,7 @@ class Actor(nn.Module):
         self.ln1 = nn.LayerNorm(512)
         self.fc2 = nn.Linear(512, 256)  
         self.ln2 = nn.LayerNorm(256)
-        self.value = nn.Linear(256, action_size) 
+        self.value = nn.Linear(256, 1) 
         self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         
     def forward(self, x, softmax_dim = -1):
@@ -331,7 +331,7 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
         # complete episode from start to end to build ReplayBuffer
 
         # while not done:
-        for t in range(1, 1000):
+        for t in range(2000):
             state = torch.from_numpy(s).float()
             prob = select_action(state, pi, pi_noisy, noise())
             s_prime, r, done = env.step(prob)

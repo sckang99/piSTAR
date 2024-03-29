@@ -39,7 +39,7 @@ buffer_length = 5000
 #Hyperparameters
 learning_rate = 1.0e-6
 gamma         = 0.98
-batch_size    = 32
+batch_size    = 64
 tau = 0.001
 noise_scale = 1.0 # 1.5
 final_noise_scale = 0.0 # 0.5
@@ -99,12 +99,12 @@ class Trade():
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        if self.cur_step < self.total_steps:
+        if self.cur_step < self.total_steps - 1:
             self.take_action(action)
             state = self.next_observation()
             reward = self.cur_balance - balance
         
-        done = self.cur_step == self.total_steps - 1
+        done = self.cur_step == self.total_steps - 2
         return state, reward, done
     
     def take_action(self, actions): 
@@ -134,7 +134,7 @@ class Trade():
     
     @property
     def next_episode(self):
-        return random.randrange(0, self.total_episodes)
+        return random.randrange(0, self.total_episodes - batch_size)
 
     @property
     def cur_indicators(self):
@@ -170,7 +170,7 @@ class Actor(nn.Module):
         self.bn1 = nn.LayerNorm(512)
         self.fc2 = nn.Linear(512, 256)
         self.bn2 = nn.LayerNorm(256)  
-        self.fc3 = nn.Linear(256, action_size) 
+        self.fc3 = nn.Linear(256, 1) 
         self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
 
     def forward(self, x):
@@ -262,7 +262,7 @@ def train_net(memory, q, q_target, pi, pi_target):
     pi.train()
     q.train()
     
-    for i in range(4):
+    for i in range(10):
         s, a, r, s_prime, done = memory.make_batch()
 
         with torch.no_grad():
@@ -355,8 +355,8 @@ def train(starting_balance = 100000, window_size = 20, resume_epoch = 0, max_epo
         # complete episode from start to end to build ReplayBuffer
         action_history = []
 
-        while not done:
-        #for t in range(1, 1000):
+        #while not done:
+        for t in range(2000):
             state = torch.from_numpy(s).float()
             noise = (np.random.randn(action_size) * ounoise.scale).clip(-1,1)
 #            noise = ounoise()
@@ -478,5 +478,5 @@ def test(starting_balance = 100000, window_size = 20, model_epi = 'final'):
         
 if __name__ == '__main__':
     starting_balance=100000
-    train(starting_balance, window_size=7, resume_epoch=0, max_epoch = 300)      
-#    test(starting_balance, window_size=7, model_epi='300')
+    train(starting_balance, window_size=7, resume_epoch=0, max_epoch = 10000)      
+#    test(starting_balance, window_size=7, model_epi='final')

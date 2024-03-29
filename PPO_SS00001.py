@@ -17,7 +17,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from collections import deque
 
@@ -56,10 +55,12 @@ gamma         = 0.98
 epsilon       = 0.10  #PPO clip para
 beta          = 0.01  #PPO entropy para
 lam           = 0.5   # if lam = 0 A2C is same as TD AC
+n_step_return = 11
 val_loss_coef = 0.5   #Critic loss contribution
 batch_size    = 128
 max_trade_share = 10  # 최대 buy or sell position
 action_space  = 2*max_trade_share + 1
+save_interval = 100
 
 class Trade():
     def __init__(self, data, starting_balance=1000000, episodic_length=20, mode='train'):  
@@ -90,12 +91,12 @@ class Trade():
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        if self.cur_step < self.total_steps:
+        if self.cur_step < self.total_steps - 1:
             self.take_action(action)
             state = self.next_observation()
             reward = self.cur_balance - balance
         
-        done = self.cur_step == self.total_steps - 1
+        done = self.cur_step == self.total_steps - 2
         return state, reward, done
     
     # 한루에 한번 씩 사거나 파는 것으로 가정
@@ -126,7 +127,7 @@ class Trade():
     
     @property
     def next_episode(self):
-        return random.randrange(0, self.total_episodes)
+        return random.randrange(0, self.total_episodes - batch_size)
 
     @property
     def cur_indicators(self):
@@ -232,12 +233,20 @@ def train_net(model, memory):
         # generalized advanced estimation GAE
         advs = torch.zeros_like(r)
         future_ages = torch.tensor(0.0, dtype = r.dtype)
+        future_advs = v_next[-1]
 
         for t in reversed(range(batch_size)):
-            delta = r[t] + gamma * v_next[t] * done[t] - v_cur[t]
-            advs[t] = future_ages = delta + gamma * lam * done[t] * future_ages 
-              
-        v_target = advs + v_cur
+            if n_step_return == 0:
+                delta = r[t] + gamma * v_next[t] * done[t] - v_cur[t]
+                advs[t] = future_ages = delta + gamma * lam * done[t] * future_ages 
+            else :      
+                advs[t] = future_advs = r[t] + gamma * future_advs * done[t]
+    
+        if n_step_return == 0 :                
+            v_target = advs + v_cur
+        else :
+            v_target = advs
+            advs = advs - v_cur
         
         # standadize advs
         advs = (advs - advs.mean())/(advs.std() + 1.0e-8)
@@ -280,7 +289,6 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
 
     memory = ReplayBuffer()
 
-    save_interval = 100
     epochs = max_epoch
     loss_history = []
     pv_history = []    # portfolio history
@@ -301,20 +309,23 @@ def train(window_size=20, starting_balance = 1000000, resume_epoch=0, max_epoch=
 
         # complete one episode
 
-        while not done:
+#        while not done:
+        for _ in range(2000):
             s = torch.from_numpy(s).float()
             prob = model.pi(s, softmax_dim=-1)  #state1: torch.size([7])
             m = Categorical(prob)
             a = m.sample().item()
             s_prime, r, done = env.step(a)
             memory.put_data((s, a, r, prob[a].item(), s_prime, done))
-            action_history.append( a )    
+            action_history.append(a)    
             s = s_prime
+            if done:
+                break
 
         np_actions = np.array(action_history)
-        index_0 = len(np.where(np_actions == 0)[0])
-        index_1 = len(np.where(np_actions > 0)[0])
-        index_2 = len(np.where(np_actions < 0)[0])
+        index_0 = len(np.where(np_actions == 10)[0])
+        index_1 = len(np.where(np_actions > 10)[0])
+        index_2 = len(np.where(np_actions < 10)[0])
         pv_history.append(env.cur_balance)
         pbar.set_description(str(index_0)+"/"+str(index_1)+"/"+str(index_2)+"/"+"%.4f" % env.cur_balance)
 
@@ -364,19 +375,22 @@ def test(window_size = 20, starting_balance = 1000000, model_epi = 'final'):
     # start from any random position of the training data
     while not done:
         state = torch.from_numpy(s).float()
-        prob = model.pi(state)  #state1: torch.size([7])
-        s_prime, r, done = env.step(prob)
+        prob = model.pi(state, softmax_dim=-1)  #state1: torch.size([7])
+        m = Categorical(prob)
+        a = m.sample().item()
+        s_prime, r, done = env.step(a)
         s = s_prime 
-        action_history.append( int(prob.item()*max_trade_share) )    
+        action_history.append(a)   
         pv = np.exp(s_prime[window_size])    
         pv_history.append(pv)                  
 
     np_actions = np.array(action_history)
     test_close = test_data["Close"].values
 
-    index_0 = np.where(np_actions == 0)[0]
-    index_1 = np.where(np_actions > 0)[0]
-    index_2 = np.where(np_actions < 0)[0]
+    index_0 = np.where(np_actions == 10)[0]
+    index_1 = np.where(np_actions > 10)[0]
+    index_2 = np.where(np_actions < 10)[0]
+    
     print(str(len(index_0))+"/"+str(len(index_1))+"/"+str(len(index_2))+"/"+"%.4f" % env.cur_balance)
 
     import matplotlib.pyplot as plt

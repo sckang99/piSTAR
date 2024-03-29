@@ -6,7 +6,7 @@
 #
 # State = [sigmoid(과거 7 일의 종가의 차이) + log(포트폴리오(현금+주식), 홀딩, 종가) + 4가지 기술적지표]
 # reward = 포트폴리오의 변화
-# Action = Hold:0, Buy:1, Sell:2 에 따라 한주씩만 거래
+# Action = -10 to 10 // 21 dimension
 #
 
 import pandas as pd
@@ -94,12 +94,12 @@ class Trade():
     def step(self, action):   # assume every day 
         balance = self.cur_balance
         self.cur_step += 1
-        if self.cur_step < self.total_steps:
+        if self.cur_step < self.total_steps - 1:
             self.take_action(action)
             state = self.next_observation()
             reward = self.cur_balance - balance
         
-        done = self.cur_step == self.total_steps - 1
+        done = self.cur_step == self.total_steps - 2
         return state, reward, done
     
     def take_action(self, action):  
@@ -129,7 +129,7 @@ class Trade():
     
     @property
     def next_episode(self):
-        return random.randrange(0, self.total_episodes)
+        return random.randrange(0, self.total_episodes - batch_size)
 
     @property
     def cur_indicators(self):
@@ -198,8 +198,8 @@ class Dqn(nn.Module):
     def forward(self, x):
         x = F.relu(self.ln1(self.fc1(x)))
         x = F.relu(self.ln2(self.fc2(x)))
-        prob = F.softmax(self.fc3(x), dim=-1)
-        return prob
+        value = self.fc3(x)
+        return value
 
     def sample_action(self, state, epsilon):         
         out = self.forward(state)
@@ -272,7 +272,8 @@ def train(window_size=20, starting_balance = 100000, resume_epoch=0, max_epoch=1
         action_history = []
         # complete one episode
  
-        while not done:
+#        while not done:
+        for _ in range(2000):
             state = torch.from_numpy(s).float()
             a = q.sample_action(state, epsilon)
             s_prime, r, done = env.step(a)
@@ -280,6 +281,8 @@ def train(window_size=20, starting_balance = 100000, resume_epoch=0, max_epoch=1
             memory.put((s, a, r, s_prime, done_mask))
             s = s_prime
             action_history.append(a)  
+            if done:
+                break
                                      
         if memory.size() > batch_size:
             loss = train_net(q, q_target, memory, optimizer)
@@ -339,14 +342,12 @@ def test(window_size = 20, starting_balance = 100000, model_epi = 'final'):
     while not done:
         state = torch.from_numpy(s).float()
         q_out = q(state)
-        a = q_out.argmax().numpy().item()#
+        a = q_out.argmax().numpy().item() #
         s_prime, r, done = env.step(a)
         s = s_prime
         action_history.append(a)
         pv = np.exp(s_prime[window_size])    
         pv_history.append(pv)                     
-
-    print("portfolio: {0}".format(pv))
 
     np_actions = np.array(action_history)
     test_close = test_data["Close"].values
@@ -354,6 +355,8 @@ def test(window_size = 20, starting_balance = 100000, model_epi = 'final'):
     index_0 = np.where(np_actions == 10)[0]
     index_1 = np.where(np_actions > 10)[0]
     index_2 = np.where(np_actions < 10)[0]
+
+    print(str(len(index_0))+"/"+str(len(index_1))+"/"+str(len(index_2))+"/"+"%.4f" % env.cur_balance)
 
     import matplotlib.pyplot as plt
     fig, axs = plt.subplots(2, 1, sharex = True)
@@ -381,5 +384,5 @@ def test(window_size = 20, starting_balance = 100000, model_epi = 'final'):
         
 if __name__ == '__main__':
     starting_balance = 100000 
-    train(window_size=7, starting_balance = starting_balance, resume_epoch=0, max_epoch = 1000)      
-#  test(window_size=7, starting_balance=staring_balance, model_epi='800')
+#   train(window_size=7, starting_balance = starting_balance, resume_epoch=0, max_epoch = 1000)      
+    test(window_size=7, starting_balance=starting_balance, model_epi='final')
