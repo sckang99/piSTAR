@@ -295,7 +295,7 @@ def train(window_size=20, starting_balance = 100000, resume_epoch=0, max_epoch=1
 
         # save log every n step
         if n_epi % save_interval == 0:
-            torch.save(q.state_dict(), "DDqnmodel_ep" + str(n_epi))    
+            torch.save(q.state_dict(), "Dqnmodel_ep" + str(n_epi))    
 
     torch.save(q.state_dict(), "Dqnmodel_epfinal") 
 
@@ -377,5 +377,5 @@ def test(window_size = 20, starting_balance = 100000, model_epi = 'final'):
         
 if __name__ == '__main__':
     starting_balance = 100000 
-    train(window_size=7, starting_balance = starting_balance, resume_epoch=0, max_epoch = 1000)      
-#    test(window_size=7, starting_balance=starting_balance, model_epi='final')
+#    train(window_size=7, starting_balance = starting_balance, resume_epoch=0, max_epoch = 1000)      
+    test(window_size=7, starting_balance=starting_balance, model_epi='100')
