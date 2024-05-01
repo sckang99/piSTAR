@@ -42,7 +42,7 @@ from tradingEnv import TradingEnv
 # Default parameters related to the DQN algorithm
 gamma = 0.4
 learningRate = 0.0001
-targetNetworkUpdate = 100
+targetNetworkUpdate = 1000
 learningUpdatePeriod = 1
 
 # Default parameters related to the Experience Replay mechanism
@@ -276,11 +276,11 @@ class Actor(nn.Module):
         OUTPUTS: - output: Output of the Deep Neural Network.
         """
 
-        x = self.dropout1(F.tanh(self.bn1(self.fc1(input))))
-        x = self.dropout2(F.tanh(self.bn2(self.fc2(x))))
-        x = self.dropout3(F.tanh(self.bn3(self.fc3(x))))
-        x = self.dropout4(F.tanh(self.bn4(self.fc4(x))))
-        prob = F.tanh(self.fc5(x))
+        x = self.dropout1(F.sigmoid(self.bn1(self.fc1(input))))
+        x = self.dropout2(F.sigmoid(self.bn2(self.fc2(x))))
+        x = self.dropout3(F.sigmoid(self.bn3(self.fc3(x))))
+        x = self.dropout4(F.sigmoid(self.bn4(self.fc4(x))))
+        prob = F.sigmoid(self.fc5(x))
         return prob
 ###############################################################################
 ################################### Class Critic #################################
@@ -376,7 +376,6 @@ class Critic(nn.Module):
         torch.nn.init.xavier_uniform_(self.fc8.weight)
         torch.nn.init.xavier_uniform_(self.fc9.weight)
         torch.nn.init.xavier_uniform_(self.fc0.weight)
-
 
         # Optimizer
         self.optimizer = optim.Adam(self.parameters(), lr=learningRate, weight_decay=L2Factor)
@@ -732,7 +731,7 @@ class TD3:
             actor_params = self.pi_noisy.state_dict()
 
             param = actor_params['fc5.bias']
-            param += torch.tensor(self.noise(), dtype=torch.float, device=self.device)
+            param += torch.tensor(self.noise(), device=self.device).float()
 
             tensorState = torch.tensor(state, dtype=torch.float, device=self.device).unsqueeze(0)
             action = self.pi_noisy(tensorState).cpu().detach().numpy().squeeze(0)
